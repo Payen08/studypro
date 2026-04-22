@@ -13,7 +13,7 @@
     <meta name="theme-color" content="#f8fafc">
 
     <link id="apple-icon" rel="apple-touch-icon" href="icon-512.png">
-    <link id="manifest-link" rel="manifest" href="manifest.json">
+    <link id="manifest-link" rel="manifest">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -359,6 +359,17 @@
         }
 
         body.dark-mode .notebook-save-btn:hover {
+            background: #3f3f46 !important;
+            box-shadow: none !important;
+        }
+
+        body.dark-mode .notebook-cloud-btn {
+            background: #27272a !important;
+            color: #fafafa !important;
+            border-color: #3f3f46 !important;
+        }
+
+        body.dark-mode .notebook-cloud-btn:hover {
             background: #3f3f46 !important;
             box-shadow: none !important;
         }
@@ -2647,6 +2658,22 @@
             border-color: #cbd5e1;
         }
 
+        .notebook-cloud-btn {
+            border: 1px solid #0f172a1f;
+            background: #0f172a;
+            color: #fff;
+            border-radius: 14px;
+            padding: 9px 14px;
+            font-size: 12px;
+            font-weight: 800;
+            transition: 0.18s ease;
+            white-space: nowrap;
+        }
+
+        .notebook-cloud-btn:hover {
+            background: #111827;
+        }
+
         /* === 历史笔记入口按钮 === */
         .nb-history-entry-btn {
             display: flex;
@@ -3961,7 +3988,10 @@
                                 <button class="toolbar-btn" onclick="execCmd('removeFormat')" title="清除格式"><i
                                         class="fas fa-eraser"></i></button>
                             </div>
-                            <button class="notebook-save-btn" onclick="saveNotebookDraft()">立即保存</button>
+                            <div class="flex gap-2">
+                                <button class="notebook-cloud-btn" onclick="debugCloudSync()">云端校验</button>
+                                <button class="notebook-save-btn" onclick="saveNotebookDraft()">立即保存</button>
+                            </div>
                         </div>
                     </div>
                     <!-- 历史笔记列表面板（滑入覆盖） -->
@@ -4150,6 +4180,7 @@
         const DEFAULT_SYNC_ID = "default";
         const SUPABASE_URL = "https://atpywxgykzhgtzhdpqbe.supabase.co";
         const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF0cHl3eGd5a3poZ3R6aGRwcWJlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ3NTAxNzYsImV4cCI6MjA4MDMyNjE3Nn0.UCd3qH2xpR7BpDFkCHUBkEgHXkj3uG1hUW-qMZ7Ys7s";
+        const IS_FILE_ORIGIN = window.location.protocol === 'file:';
 
         // 2026 节假日 (补充完整版)
         const HOLIDAYS_2026 = {
@@ -4269,7 +4300,15 @@
         document.getElementById('apple-icon').href = iconUrl;
 
         const manifest = { name: "冲刺计划 Pro", short_name: "冲刺", start_url: window.location.href, display: "standalone", background_color: "#f6f8fa", theme_color: "#ffffff", icons: [{ src: iconUrl, sizes: "512x512", type: "image/svg+xml" }] };
-        document.getElementById('manifest-link').href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
+        const manifestLink = document.getElementById('manifest-link');
+        if (manifestLink) {
+            if (IS_FILE_ORIGIN) {
+                // file:// 下浏览器禁止 manifest，避免产生误导性的 CORS 报错
+                manifestLink.removeAttribute('href');
+            } else {
+                manifestLink.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
+            }
+        }
 
         // ================= 全局状态 =================
         let CURRENT_YEAR = 2025; // 默认为2025模式
@@ -4507,6 +4546,12 @@
             updateSyncLabel();
             applyLineHeight();
             initEditorEvents();
+
+            if (IS_FILE_ORIGIN) {
+                setTimeout(() => {
+                    showToast('⚠️ 当前是 file:// 直开模式，建议用 http://localhost 访问以保证云端/PWA稳定');
+                }, 450);
+            }
 
             // 首次访问：强制设置同步 ID
             if (!localStorage.getItem('study_sync_id')) {
@@ -4949,14 +4994,12 @@
                 const mergedDone = new Set(merged[year].done || []);
                 localDone.forEach(id => mergedDone.add(id));
                 merged[year].done = Array.from(mergedDone);
-                // notes 合并：取 updatedAt 更新的版本（本地有但云端没有的也保留）
+                // notes 合并：notes 本身是 HTML 字符串（无 updatedAt）
+                // 为避免“本地刚编辑，刷新/重载后被云端旧数据覆盖”，这里采用本地优先策略。
                 const localNotes = local[year].notes || {};
                 if (!merged[year].notes) merged[year].notes = {};
                 Object.keys(localNotes).forEach(k => {
-                    if (!merged[year].notes[k]) {
-                        merged[year].notes[k] = localNotes[k];
-                    }
-                    // 注：notes 内容为 HTML 字符串，无 updatedAt，本地缺失时补充即可
+                    merged[year].notes[k] = localNotes[k];
                 });
                 // customTasks 合并
                 const localTasks = local[year].customTasks || {};
@@ -5001,27 +5044,62 @@
                 console.error('数据完整性检查失败，跳过保存');
                 return;
             }
+            if (typeof window._cloudDebug !== 'object') window._cloudDebug = { lastErr: null, lastOkAt: null, lastBytes: null };
+            try { window._cloudDebug.lastBytes = new Blob([JSON.stringify(fullState)]).size; } catch (_) { /* ignore */ }
             // 始终先保存到本地（本地优先，确保数据不丢）
+            let localSaveOk = true;
             try {
                 const json = JSON.stringify(fullState);
                 localStorage.setItem('study_v2', json);
             } catch (e) {
                 console.error('本地保存失败:', e);
-                return;
+                localSaveOk = false;
+                if (typeof showToast === 'function') showToast('⚠️ 本地保存失败，已尝试仅同步云端');
             }
             // 云端同步
             if (isCloud) {
                 updateStatus('syncing');
                 try {
-                    const { error } = await supabaseClient.from('study_progress').upsert({ id: MY_SYNC_ID, data: fullState });
+                    const { error } = await supabaseClient
+                        .from('study_progress')
+                        .upsert({ id: MY_SYNC_ID, data: fullState }, { onConflict: 'id' });
                     if (error) throw error;
+                    window._cloudDebug.lastErr = null;
+                    window._cloudDebug.lastOkAt = new Date().toISOString();
                     updateStatus('online');
                 } catch (e) {
                     console.error('云端保存失败:', e);
+                    window._cloudDebug.lastErr = (e && (e.message || e.details || e.hint)) ? (e.message || e.details || e.hint) : String(e);
+                    if (typeof showToast === 'function') showToast(`⚠️ 云端保存失败：${e?.message || '请检查 Supabase 配置'}`);
                     updateStatus('offline');
                 }
+            } else if (!localSaveOk) {
+                updateStatus('offline');
             }
         }
+
+        // 云端校验：读取 Supabase 当前记录并显示 notebook 数量/错误信息
+        window.debugCloudSync = async () => {
+            if (!isCloud || !supabaseClient) {
+                showToast('⚠️ 当前不是云端模式（isCloud=false）');
+                return;
+            }
+            try {
+                const { data, error } = await supabaseClient
+                    .from('study_progress')
+                    .select('data')
+                    .eq('id', MY_SYNC_ID)
+                    .maybeSingle();
+                if (error) throw error;
+                const cloud = data?.data || null;
+                const cloudNb = cloud ? (Object.keys(cloud?.['2025']?.notebookEntries || {}).length + Object.keys(cloud?.['2026']?.notebookEntries || {}).length) : 0;
+                const localNb = Object.keys(fullState?.['2025']?.notebookEntries || {}).length + Object.keys(fullState?.['2026']?.notebookEntries || {}).length;
+                const bytes = window._cloudDebug?.lastBytes ? `${window._cloudDebug.lastBytes}` : '?';
+                showToast(`云端校验：id=${MY_SYNC_ID} cloudNb=${cloudNb} localNb=${localNb} bytes=${bytes}`);
+            } catch (e) {
+                showToast(`⚠️ 云端校验失败：${e?.message || String(e)}`);
+            }
+        };
 
         // 核心：注入初始计划
         function inject2026Plan() {
@@ -5044,6 +5122,7 @@
 
         async function loadCloud() {
             updateStatus('syncing');
+            let cloudOk = true;
 
             // 1. 先加载本地数据作为基础和备份
             const localBackup = localStorage.getItem('study_v2');
@@ -5069,7 +5148,11 @@
 
             // 3. 尝试拉取云端数据
             try {
-                const { data, error } = await supabaseClient.from('study_progress').select('data').eq('id', MY_SYNC_ID).single();
+                const { data, error } = await supabaseClient
+                    .from('study_progress')
+                    .select('data')
+                    .eq('id', MY_SYNC_ID)
+                    .maybeSingle();
 
                 if (error) throw error;
 
@@ -5103,6 +5186,7 @@
                 // 云端无数据 → 保持本地数据不动（已在步骤2加载）
             } catch (e) {
                 console.error('云端加载失败，使用本地数据:', e);
+                cloudOk = false;
                 // 网络失败 → 保持本地数据，不覆盖
             }
 
@@ -5120,7 +5204,7 @@
 
             refresh();
             window.switchYear(CURRENT_YEAR);
-            updateStatus('online');
+            updateStatus(cloudOk ? 'online' : 'offline');
         }
 
         function loadLocal() {
@@ -7653,7 +7737,7 @@
     </script>
     <!-- PWA Service Worker 注册 -->
     <script>
-        if ('serviceWorker' in navigator) {
+        if ('serviceWorker' in navigator && window.location.protocol !== 'file:') {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('./sw.js')
                     .then(reg => console.log('✅ SW registered:', reg.scope))
